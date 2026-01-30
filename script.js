@@ -1,316 +1,447 @@
 /**
- * SKY EXPRESS - INTERNATIONAL COURIERS VIZAG
- * CORE ENGINE V2.0 (Premium Visual Wonder Edition)
- * Features: WhatsApp Integration, Parallax Effects, GSAP-style Transitions
+ * SKY EXPRESS — Visual Wonder UI Script (single-file)
+ * Copy this entire file into script.js and load with: <script src="script.js" defer></script>
+ *
+ * Features:
+ * - Loader hide and AOS initialization
+ * - Lazy-load hero background (WebP preferred, JPG fallback)
+ * - Navbar glass effect on scroll (debounced)
+ * - Mobile menu toggle with accessible state, outside/escape close
+ * - Smooth internal link scrolling with focus management
+ * - Pickup form -> WhatsApp prefill, validation, duplicate-prevent, accessible status + toast
+ * - Animated stat counters
+ * - Subtle hero image parallax
+ * - Lightweight, dependency-safe, mobile-first
  */
 
 "use strict";
 
-const SkyExpressEngine = (() => {
-    // --- Configuration & Constants ---
-    const CONFIG = {
-        businessNumber: "918121592299", //
-        locationName: "Sundar Nagar, Vizag Hub", //
-        animationDuration: 1200,
-        scrollThreshold: 100,
-        loaderDelay: 1800
+(() => {
+  /* =========================
+     Configuration
+     ========================= */
+  const CONFIG = {
+    BUSINESS_NUMBER: "918121592299",      // WhatsApp number without plus
+    WA_COOLDOWN_MS: 3000,                 // prevent rapid repeated WA opens
+    DUPLICATE_BLOCK_MS: 5 * 60 * 1000,    // block identical submissions for 5 minutes
+    LOADER_FADE_MS: 450,
+    COUNTER_FRAME_MS: 12,
+    NAV_SCROLL_THRESHOLD: 90,
+    PARALLAX_MAX_PX: 28
+  };
+
+  /* =========================
+     DOM helpers & elements
+     ========================= */
+  const $ = sel => document.querySelector(sel);
+  const $$ = sel => Array.from(document.querySelectorAll(sel));
+  const isEl = v => v instanceof Element;
+
+  const dom = {
+    loader: $("#loader-wrapper"),
+    navbar: $("#navbar"),
+    mobileToggle: $("#mobile-menu-toggle"),
+    primaryMenu: $("#primary-menu"),
+    toast: $("#toast"),
+    form: $("#skyExpressForm") || $("#pickup-form") || $("#skyExpressForm"),
+    formStatus: $("#form-status"),
+    statNums: $$(".stat-num"),
+    heroImg: $(".main-hero-img"),
+    heroSection: $(".hero-section"),
+    yearEl: $("#year")
+  };
+
+  /* =========================
+     Utilities
+     ========================= */
+  const now = () => Date.now();
+  const sleep = ms => new Promise(res => setTimeout(res, ms));
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+  function debounce(fn, wait = 100) {
+    let t;
+    return (...args) => {
+      clearTimeout(t);
+      t = setTimeout(() => fn.apply(this, args), wait);
     };
+  }
 
-    // --- DOM Elements ---
-    const dom = {
-        navbar: document.getElementById('navbar'),
-        loader: document.getElementById('loader-wrapper'),
-        pickupForm: document.getElementById('skyExpressForm'),
-        navLinks: document.querySelectorAll('.nav-links a'),
-        mobileBtn: document.querySelector('.mobile-menu-btn'),
-        statNums: document.querySelectorAll('.stat-num')
+  // Simple non-cryptographic hash for duplicate detection
+  function simpleHash(str) {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return (h >>> 0).toString(16);
+  }
+
+  // Toast helper
+  function showToast(msg, ms = 3500) {
+    const t = dom.toast;
+    if (!isEl(t)) {
+      // fallback
+      console.info("Toast:", msg);
+      return;
+    }
+    t.textContent = msg;
+    t.hidden = false;
+    t.classList.add("show");
+    clearTimeout(t._timeout);
+    t._timeout = setTimeout(() => {
+      t.classList.remove("show");
+      t._timeout2 = setTimeout(() => t.hidden = true, 300);
+    }, ms);
+  }
+
+  // Phone normalization to E.164-ish
+  function normalizePhone(raw) {
+    if (!raw) return "";
+    let s = raw.trim();
+    s = s.replace(/[()\s.-]/g, "");
+    if (/^0\d{9,}$/.test(s)) s = "+91" + s.slice(1);
+    if (/^(\d{10})$/.test(s)) s = "+91" + s;
+    if (!s.startsWith("+") && /^\d{7,15}$/.test(s)) s = "+" + s;
+    s = s.replace(/[^\d+]/g, "");
+    return s;
+  }
+
+  function isValidE164(phone) {
+    return /^\+\d{7,15}$/.test(phone);
+  }
+
+  // LocalStorage duplicate prevention
+  const LAST_SUB_KEY = "sky_last_pickup";
+  function canSendSubmission(hash) {
+    try {
+      const raw = localStorage.getItem(LAST_SUB_KEY);
+      if (!raw) return true;
+      const obj = JSON.parse(raw);
+      if (obj.hash === hash && (now() - obj.ts) < CONFIG.DUPLICATE_BLOCK_MS) return false;
+      return true;
+    } catch {
+      return true;
+    }
+  }
+  function recordSubmission(hash) {
+    try {
+      localStorage.setItem(LAST_SUB_KEY, JSON.stringify({ hash, ts: now() }));
+    } catch { /* ignore */ }
+  }
+
+  /* =========================
+     Loader & AOS
+     ========================= */
+  function initLoader() {
+    if (!isEl(dom.loader)) return;
+    window.addEventListener("load", async () => {
+      await sleep(CONFIG.LOADER_FADE_MS);
+      dom.loader.style.opacity = "0";
+      dom.loader.style.pointerEvents = "none";
+      setTimeout(() => {
+        dom.loader.style.display = "none";
+        dom.loader.setAttribute("aria-hidden", "true");
+      }, CONFIG.LOADER_FADE_MS);
+      if (window.AOS && typeof AOS.refresh === "function") AOS.refresh();
+    });
+  }
+
+  function initAOS() {
+    if (window.AOS && typeof AOS.init === "function") {
+      AOS.init({ duration: 700, once: true, easing: "ease-out-cubic" });
+    }
+  }
+
+  /* =========================
+     Lazy-load hero background
+     ========================= */
+  function lazyLoadHeroBackground() {
+    const hero = dom.heroSection;
+    if (!isEl(hero)) return;
+    const webp = "assets/hero-bg.webp";
+    const jpg = "assets/hero-bg.jpg";
+    const img = new Image();
+    img.onload = () => {
+      hero.style.backgroundImage = `linear-gradient(rgba(255,255,255,0.92), rgba(244,247,255,0.85)), url('${webp}')`;
     };
-
-    /**
-     * Initialize all modules
-     */
-    const init = () => {
-        handlePreloader();
-        setupNavbarScroll();
-        initScrollAnimations();
-        setupWhatsAppForm();
-        setupSmoothScrolling();
-        initCounterEffect();
-        handleMobileMenu();
-        injectVisualPolish();
+    img.onerror = () => {
+      hero.style.backgroundImage = `linear-gradient(rgba(255,255,255,0.92), rgba(244,247,255,0.85)), url('${jpg}')`;
     };
+    img.src = webp;
+  }
 
-    /**
-     * 1. PRELOADER & ENTRANCE ANIMATION
-     * Manages the "Visual Wonder" entrance experience
-     */
-    const handlePreloader = () => {
-        window.addEventListener('load', () => {
-            setTimeout(() => {
-                if (dom.loader) {
-                    dom.loader.style.opacity = '0';
-                    dom.loader.style.visibility = 'hidden';
-                    
-                    // Trigger AOS refresh to sync with loader removal
-                    if (typeof AOS !== 'undefined') {
-                        AOS.refresh();
-                    }
-                    
-                    document.body.style.overflowY = 'auto';
-                    console.log("SKY EXPRESS: Interface Ready");
-                }
-            }, CONFIG.loaderDelay);
-        });
+  /* =========================
+     Navbar scroll effect
+     ========================= */
+  function initNavbarScroll() {
+    if (!isEl(dom.navbar)) return;
+    const onScroll = () => {
+      if (window.scrollY > CONFIG.NAV_SCROLL_THRESHOLD) dom.navbar.classList.add("scrolled");
+      else dom.navbar.classList.remove("scrolled");
     };
+    window.addEventListener("scroll", debounce(onScroll, 60));
+    onScroll();
+  }
 
-    /**
-     * 2. SMART NAVBAR TRANSITIONS
-     * Changes appearance based on scroll depth for Glassmorphism effect
-     */
-    const setupNavbarScroll = () => {
-        const handleScroll = () => {
-            if (window.scrollY > CONFIG.scrollThreshold) {
-                dom.navbar.classList.add('scrolled');
-            } else {
-                dom.navbar.classList.remove('scrolled');
-            }
-        };
+  /* =========================
+     Mobile menu
+     ========================= */
+  function initMobileMenu() {
+    const toggle = dom.mobileToggle;
+    const menu = dom.primaryMenu;
+    if (!isEl(toggle) || !isEl(menu)) return;
 
-        window.addEventListener('scroll', handleScroll);
-        handleScroll(); // Check on init
-    };
+    toggle.addEventListener("click", () => {
+      const expanded = toggle.getAttribute("aria-expanded") === "true";
+      toggle.setAttribute("aria-expanded", String(!expanded));
+      menu.classList.toggle("open");
+      menu.setAttribute("aria-hidden", String(expanded));
+      if (!expanded) {
+        const first = menu.querySelector("a");
+        if (first) first.focus();
+      }
+    });
 
-    /**
-     * 3. WHATSAPP DISPATCH ENGINE
-     * Formats user data into a professional business order
-     */
-    const setupWhatsAppForm = () => {
-        if (!dom.pickupForm) return;
+    // Close when clicking a link inside menu
+    menu.addEventListener("click", e => {
+      const a = e.target.closest("a");
+      if (!a) return;
+      if (menu.classList.contains("open")) {
+        menu.classList.remove("open");
+        toggle.setAttribute("aria-expanded", "false");
+        menu.setAttribute("aria-hidden", "true");
+      }
+    });
 
-        dom.pickupForm.addEventListener('submit', (e) => {
-            e.preventDefault();
+    // Close on outside click
+    document.addEventListener("click", e => {
+      if (!menu.classList.contains("open")) return;
+      if (e.target.closest("#primary-menu") || e.target.closest("#mobile-menu-toggle")) return;
+      menu.classList.remove("open");
+      toggle.setAttribute("aria-expanded", "false");
+      menu.setAttribute("aria-hidden", "true");
+    });
 
-            // Extract Data
-            const formData = {
-                name: document.getElementById('cust_name').value.trim(),
-                phone: document.getElementById('cust_phone').value.trim(),
-                service: document.getElementById('service_type').value,
-                address: document.getElementById('cust_address').value.trim(),
-                timestamp: new Date().toLocaleString()
-            };
+    // Close on Escape
+    document.addEventListener("keydown", e => {
+      if (e.key === "Escape" && menu.classList.contains("open")) {
+        menu.classList.remove("open");
+        toggle.setAttribute("aria-expanded", "false");
+        menu.setAttribute("aria-hidden", "true");
+        toggle.focus();
+      }
+    });
+  }
 
-            // Validation Animation
-            const submitBtn = dom.pickupForm.querySelector('.submit-wa');
-            const originalHTML = submitBtn.innerHTML;
-            
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = `<i class="fas fa-circle-notch fa-spin"></i> GENERATING REQUEST...`;
+  /* =========================
+     Smooth internal link scrolling
+     ========================= */
+  function initSmoothScroll() {
+    document.addEventListener("click", e => {
+      const a = e.target.closest('a[href^="#"]');
+      if (!a) return;
+      const href = a.getAttribute("href");
+      if (!href || href === "#" || href === "#0") return;
+      const target = document.querySelector(href);
+      if (!target) return;
+      e.preventDefault();
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+      history.replaceState(null, "", href);
+      // move focus for accessibility
+      target.setAttribute("tabindex", "-1");
+      target.focus({ preventScroll: true });
+      target.removeAttribute("tabindex");
+    });
+  }
 
-            // Professional Message Formatting
-            const message = 
-                `*🚀 SKY EXPRESS - NEW PICKUP REQUEST*%0A` +
-                `----------------------------------------%0A` +
-                `👤 *Customer:* ${formData.name}%0A` +
-                `📞 *Contact:* ${formData.phone}%0A` +
-                `📦 *Service:* ${formData.service} Courier%0A` +
-                `📍 *Address:* ${formData.address}%0A` +
-                `----------------------------------------%0A` +
-                `🕒 *Requested at:* ${formData.timestamp}%0A` +
-                `🏙️ *Hub:* ${CONFIG.locationName}`;
+  /* =========================
+     Pickup form -> WhatsApp
+     ========================= */
+  function initPickupForm() {
+    const form = dom.form;
+    if (!isEl(form)) return;
 
-            const whatsappURL = `https://wa.me/${CONFIG.businessNumber}?text=${message}`;
+    let submitBtn = form.querySelector('button[type="submit"]') || form.querySelector('.submit-wa');
+    if (!isEl(submitBtn)) {
+      submitBtn = document.createElement("button");
+      submitBtn.type = "submit";
+      submitBtn.className = "submit-wa btn-main";
+      submitBtn.textContent = "Send Request to WhatsApp";
+      form.appendChild(submitBtn);
+    }
 
-            // Visual Delay for "Wonder" Effect
-            setTimeout(() => {
-                window.open(whatsappURL, '_blank');
-                
-                // Reset Form and UI
-                submitBtn.disabled = false;
-                submitBtn.innerHTML = `<i class="fas fa-check-circle"></i> REQUEST SENT!`;
-                submitBtn.style.background = "#0046b8";
-                
-                setTimeout(() => {
-                    submitBtn.innerHTML = originalHTML;
-                    submitBtn.style.background = "";
-                    dom.pickupForm.reset();
-                }, 3000);
-            }, 1000);
-        });
-    };
+    form.addEventListener("submit", async e => {
+      e.preventDefault();
 
-    /**
-     * 4. SCROLL ANIMATION INITIALIZATION
-     */
-    const initScrollAnimations = () => {
-        if (typeof AOS !== 'undefined') {
-            AOS.init({
-                offset: 120,
-                delay: 50,
-                duration: 800,
-                easing: 'ease-in-out-cubic',
-                once: true,
-                mirror: false,
-                anchorPlacement: 'top-bottom',
-            });
+      if (!form.checkValidity()) {
+        form.reportValidity();
+        return;
+      }
+
+      // Collect fields (support both id sets)
+      const nameEl = form.querySelector("#cust_name, #name");
+      const phoneEl = form.querySelector("#cust_phone, #phone");
+      const emailEl = form.querySelector("#email");
+      const addressEl = form.querySelector("#cust_address, #pickup-address");
+      const serviceEl = form.querySelector("#service_type, #service-type");
+      const notesEl = form.querySelector("#notes");
+
+      const data = {
+        name: nameEl ? nameEl.value.trim() : "",
+        phoneRaw: phoneEl ? phoneEl.value.trim() : "",
+        email: emailEl ? emailEl.value.trim() : "",
+        address: addressEl ? addressEl.value.trim() : "",
+        service: serviceEl ? serviceEl.value : "",
+        notes: notesEl ? notesEl.value.trim() : "",
+        time: new Date().toLocaleString()
+      };
+
+      const phone = normalizePhone(data.phoneRaw);
+      if (!isValidE164(phone)) {
+        showFormStatus("Please enter a valid phone number including country code.", true);
+        return;
+      }
+
+      const lines = [
+        "SKY EXPRESS — Pickup Request",
+        `Name: ${data.name || "N/A"}`,
+        `Phone: ${phone}`,
+        data.email ? `Email: ${data.email}` : null,
+        `Service: ${data.service || "N/A"}`,
+        `Address: ${data.address || "N/A"}`,
+        data.notes ? `Notes: ${data.notes}` : null,
+        `Time: ${data.time}`
+      ].filter(Boolean);
+      const message = lines.join("\n");
+
+      const hash = simpleHash(message);
+      if (!canSendSubmission(hash)) {
+        showToast("You already sent this request recently. Our team will contact you shortly.");
+        return;
+      }
+
+      if (form._lastWa && (now() - form._lastWa) < CONFIG.WA_COOLDOWN_MS) {
+        showToast("Please wait a moment before sending another request.");
+        return;
+      }
+      form._lastWa = now();
+
+      // UI feedback
+      const originalHTML = submitBtn.innerHTML;
+      submitBtn.disabled = true;
+      submitBtn.setAttribute("aria-busy", "true");
+      submitBtn.innerHTML = `<i class="fas fa-circle-notch fa-spin" aria-hidden="true"></i> Preparing...`;
+
+      const encoded = encodeURIComponent(message);
+      const waUrl = `https://wa.me/${CONFIG.BUSINESS_NUMBER}?text=${encoded}`;
+
+      recordSubmission(hash);
+
+      await sleep(650);
+      try {
+        window.open(waUrl, "_blank", "noopener");
+        showToast("WhatsApp opened. Please confirm and send the message.");
+        showFormStatus("WhatsApp opened. Please complete the message to confirm your pickup request.", false);
+        form.reset();
+      } catch (err) {
+        showToast("Unable to open WhatsApp. Please try again or call +91 81215 92299.");
+        showFormStatus("Failed to open WhatsApp. Please try again or call +91 81215 92299.", true);
+      } finally {
+        submitBtn.disabled = false;
+        submitBtn.removeAttribute("aria-busy");
+        submitBtn.innerHTML = originalHTML;
+      }
+    });
+
+    function showFormStatus(msg, isError = false) {
+      if (!isEl(dom.formStatus)) return;
+      dom.formStatus.hidden = false;
+      dom.formStatus.textContent = msg;
+      dom.formStatus.style.color = isError ? "#b00020" : "";
+    }
+  }
+
+  /* =========================
+     Animated counters
+     ========================= */
+  function initCounters() {
+    const els = dom.statNums || [];
+    if (!els.length) return;
+    els.forEach(el => {
+      const target = parseInt(el.getAttribute("data-target") || el.textContent || "0", 10);
+      if (isNaN(target) || target <= 0) return;
+      el.textContent = "0";
+      let current = 0;
+      const step = Math.max(1, Math.floor(target / (1000 / CONFIG.COUNTER_FRAME_MS)));
+      const timer = setInterval(() => {
+        current += step;
+        if (current >= target) {
+          el.textContent = String(target);
+          clearInterval(timer);
+        } else {
+          el.textContent = String(current);
         }
+      }, CONFIG.COUNTER_FRAME_MS);
+    });
+  }
+
+  /* =========================
+     Hero parallax
+     ========================= */
+  function initParallax() {
+    const img = dom.heroImg;
+    if (!isEl(img)) return;
+    const onScroll = () => {
+      const rect = img.getBoundingClientRect();
+      const vh = window.innerHeight || document.documentElement.clientHeight;
+      const center = rect.top + rect.height / 2;
+      const progress = clamp((center - vh / 2) / (vh / 2), -1, 1);
+      const translate = -progress * CONFIG.PARALLAX_MAX_PX;
+      img.style.transform = `translateY(${translate}px)`;
     };
+    window.addEventListener("scroll", debounce(onScroll, 12), { passive: true });
+    onScroll();
+  }
 
-    /**
-     * 5. SMART SMOOTH SCROLLING
-     */
-    const setupSmoothScrolling = () => {
-        dom.navLinks.forEach(link => {
-            link.addEventListener('click', function(e) {
-                const href = this.getAttribute('href');
-                
-                if (href.startsWith('#')) {
-                    e.preventDefault();
-                    const target = document.querySelector(href);
-                    
-                    if (target) {
-                        const offsetPosition = target.offsetTop - 80;
+  /* =========================
+     Accessibility: focus ring handling
+     ========================= */
+  function initFocusRing() {
+    let mouseMode = false;
+    window.addEventListener("mousedown", () => mouseMode = true);
+    window.addEventListener("keydown", e => {
+      if (e.key === "Tab") mouseMode = false;
+    });
+    document.documentElement.classList.toggle("show-focus", !mouseMode);
+  }
 
-                        window.scrollTo({
-                            top: offsetPosition,
-                            behavior: "smooth"
-                        });
+  /* =========================
+     Init all
+     ========================= */
+  function init() {
+    initLoader();
+    initAOS();
+    lazyLoadHeroBackground();
+    initNavbarScroll();
+    initMobileMenu();
+    initSmoothScroll();
+    initPickupForm();
+    initCounters();
+    initParallax();
+    initFocusRing();
+    if (isEl(dom.yearEl)) dom.yearEl.textContent = new Date().getFullYear();
+  }
 
-                        // Update Active State
-                        dom.navLinks.forEach(l => l.classList.remove('active'));
-                        this.classList.add('active');
-                    }
-                }
-            });
-        });
-    };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
 
-    /**
-     * 6. DATA COUNTER EFFECT
-     * Animates numbers as they scroll into view
-     */
-    const initCounterEffect = () => {
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (entry.isIntersecting) {
-                    const target = entry.target;
-                    const endValue = parseInt(target.innerText);
-                    animateNumber(target, 0, endValue, 2000);
-                    observer.unobserve(target);
-                }
-            });
-        }, { threshold: 0.5 });
-
-        dom.statNums.forEach(num => observer.observe(num));
-    };
-
-    const animateNumber = (obj, start, end, duration) => {
-        let startTimestamp = null;
-        const step = (timestamp) => {
-            if (!startTimestamp) startTimestamp = timestamp;
-            const progress = Math.min((timestamp - startTimestamp) / duration, 1);
-            obj.innerHTML = Math.floor(progress * (end - start) + start) + "%";
-            if (progress < 1) {
-                window.requestAnimationFrame(step);
-            }
-        };
-        window.requestAnimationFrame(step);
-    };
-
-    /**
-     * 7. MOBILE MENU LOGIC
-     */
-    const handleMobileMenu = () => {
-        if (!dom.mobileBtn) return;
-
-        dom.mobileBtn.addEventListener('click', () => {
-            dom.mobileBtn.classList.toggle('active');
-            const navMenu = document.querySelector('.nav-links');
-            navMenu.classList.toggle('show');
-        });
-    };
-
-    /**
-     * 8. VISUAL POLISH (Cursor & Hover Effects)
-     */
-    const injectVisualPolish = () => {
-        // Subtle Parallax on Hero Image
-        window.addEventListener('mousemove', (e) => {
-            const moveX = (e.clientX - window.innerWidth / 2) * 0.01;
-            const moveY = (e.clientY - window.innerHeight / 2) * 0.01;
-            const heroImg = document.querySelector('.main-hero-img');
-            
-            if (heroImg) {
-                heroImg.style.transform = `perspective(1000px) rotateY(${-5 + moveX}deg) rotateX(${moveY}deg)`;
-            }
-        });
-    };
-
-    // --- Public API ---
-    return {
-        run: init
-    };
-
+  // Expose a small API for debugging if needed
+  window.SkyExpressUI = {
+    init,
+    showToast,
+    normalizePhone
+  };
 })();
-
-// Start the Engine
-SkyExpressEngine.run();
-// ... [Previous SkyExpressEngine code] ...
-
-const Airspace = (() => {
-    const container = document.getElementById('airspace-container');
-    const colors = ['plane-blue', 'plane-orange', 'plane-purple'];
-
-    const createPlane = () => {
-        const plane = document.createElement('div');
-        const colorClass = colors[Math.floor(Math.random() * colors.length)];
-        plane.className = `dynamic-plane ${colorClass}`;
-        plane.innerHTML = `<i class="fas fa-plane"></i><div class="courier-box"><i class="fas fa-box"></i></div>`;
-        
-        // Random Start Position
-        const side = Math.floor(Math.random() * 4); // 0:Top, 1:Right, 2:Bottom, 3:Left
-        let x = 0, y = 0;
-        if(side === 0) { x = Math.random() * 100; y = -10; }
-        else if(side === 1) { x = 110; y = Math.random() * 100; }
-        else if(side === 2) { x = Math.random() * 100; y = 110; }
-        else { x = -10; y = Math.random() * 100; }
-
-        plane.style.left = x + 'vw';
-        plane.style.top = y + 'vh';
-        container.appendChild(plane);
-
-        // Random 3D Destination
-        const destX = Math.random() * 100;
-        const destY = Math.random() * 100;
-        const rotation = Math.atan2(destY - y, destX - x) * (180 / Math.PI);
-
-        const animation = plane.animate([
-            { transform: `translate(0,0) rotate(${rotation}deg) rotateX(20deg)` },
-            { transform: `translate(${(destX-x)}vw, ${(destY-y)}vh) rotate(${rotation}deg) rotateX(-20deg)` }
-        ], {
-            duration: 8000 + Math.random() * 5000,
-            iterations: Infinity,
-            direction: 'alternate'
-        });
-
-        // Tap to Stop & Load Courier
-        plane.onclick = () => {
-            animation.pause();
-            plane.classList.add('loading-package');
-            
-            setTimeout(() => {
-                plane.classList.remove('loading-package');
-                plane.classList.add('plane-closed'); // Visual "Closed" state
-                
-                setTimeout(() => {
-                    animation.play(); // Travel again
-                }, 500);
-            }, 1000);
-        };
-    };
-
-    return { init: () => { for(let i=0; i<5; i++) createPlane(); } };
-})();
-
-// FINAL EXECUTION LINE
-SkyExpressEngine.run(); 
-Airspace.init(); // <--- Paste and call it here
